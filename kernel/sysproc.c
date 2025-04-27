@@ -9,10 +9,14 @@
 uint64
 sys_exit(void)
 {
-  int n;
-  argint(0, &n);
-  exit(n);
-  return 0;  // not reached
+  int status;
+  char msg[32];
+
+  argint(0, &status);
+  argstr(1, msg, sizeof(msg));
+
+  exit(status, msg);
+  return 0; // This line won't be reached
 }
 
 uint64
@@ -27,12 +31,17 @@ sys_fork(void)
   return fork();
 }
 
+
 uint64
 sys_wait(void)
 {
-  uint64 p;
-  argaddr(0, &p);
-  return wait(p);
+  uint64 status_ptr;
+  uint64 msg_ptr;
+
+  argaddr(0, &status_ptr);
+  argaddr(1, &msg_ptr);
+
+  return wait(status_ptr, msg_ptr);
 }
 
 uint64
@@ -88,4 +97,32 @@ sys_uptime(void)
   xticks = ticks;
   release(&tickslock);
   return xticks;
+}
+
+//memsize
+uint64
+sys_memsize(void)
+{
+  struct proc *p = myproc();
+  return p->sz;
+}
+
+uint64
+sys_forkn(void)
+{
+  int n;
+  uint64 pids;
+  argint(0, &n);
+  argaddr(0, &pids);
+  return forkn(n, (int*)pids);
+}
+
+uint64
+sys_waitall(void)
+{
+  uint64 n_addr;
+  uint64 statuses_addr;
+  argaddr(0, &n_addr);
+  argaddr(1, &statuses_addr);
+  return waitall(n_addr, statuses_addr);
 }

@@ -6,6 +6,7 @@
 #include "proc.h"
 #include "defs.h"
 
+
 struct cpu cpus[NCPU];
 
 struct proc proc[NPROC];
@@ -343,17 +344,23 @@ reparent(struct proc *p)
 // Exit the current process.  Does not return.
 // An exited process remains in the zombie state
 // until its parent calls wait().
-void
-exit(int status)
+void 
+exit(int status, char *msg)
 {
   struct proc *p = myproc();
 
-  if(p == initproc)
+  if (p == initproc)
     panic("init exiting");
 
+  if (msg != 0)
+  {
+    strncpy(p->exit_msg, msg, 32);
+  }
   // Close all open files.
-  for(int fd = 0; fd < NOFILE; fd++){
-    if(p->ofile[fd]){
+  for (int fd = 0; fd < NOFILE; fd++)
+  {
+    if (p->ofile[fd])
+    {
       struct file *f = p->ofile[fd];
       fileclose(f);
       p->ofile[fd] = 0;
@@ -372,7 +379,7 @@ exit(int status)
 
   // Parent might be sleeping in wait().
   wakeup(p->parent);
-  
+
   acquire(&p->lock);
 
   p->xstate = status;
@@ -385,10 +392,11 @@ exit(int status)
   panic("zombie exit");
 }
 
+
 // Wait for a child process to exit and return its pid.
 // Return -1 if this process has no children.
 int
-wait(uint64 addr)
+wait(uint64 addr, uint64 msgaddr)//add message
 {
   struct proc *pp;
   int havekids, pid;
@@ -396,23 +404,31 @@ wait(uint64 addr)
 
   acquire(&wait_lock);
 
-  for(;;){
+  for (;;)
+  {
     // Scan through table looking for exited children.
     havekids = 0;
-    for(pp = proc; pp < &proc[NPROC]; pp++){
-      if(pp->parent == p){
+    for (pp = proc; pp < &proc[NPROC]; pp++)
+    {
+      if (pp->parent == p)
+      {
         // make sure the child isn't still in exit() or swtch().
         acquire(&pp->lock);
 
         havekids = 1;
-        if(pp->state == ZOMBIE){
+        if (pp->state == ZOMBIE)
+        {
           // Found one.
           pid = pp->pid;
-          if(addr != 0 && copyout(p->pagetable, addr, (char *)&pp->xstate,
-                                  sizeof(pp->xstate)) < 0) {
+          if (addr != 0 && copyout(p->pagetable, addr, (char *)&pp->xstate,
+                                   sizeof(pp->xstate)) < 0)
+          {
             release(&pp->lock);
             release(&wait_lock);
             return -1;
+          }
+          if (msgaddr != 0x0){
+            copyout(p->pagetable, msgaddr, pp->exit_msg, 32);
           }
           freeproc(pp);
           release(&pp->lock);
@@ -424,13 +440,14 @@ wait(uint64 addr)
     }
 
     // No point waiting if we don't have any children.
-    if(!havekids || killed(p)){
+    if (!havekids || killed(p))
+    {
       release(&wait_lock);
       return -1;
     }
-    
+
     // Wait for a child to exit.
-    sleep(p, &wait_lock);  //DOC: wait-sleep
+    sleep(p, &wait_lock); // DOC: wait-sleep
   }
 }
 
@@ -679,5 +696,151 @@ procdump(void)
       state = "???";
     printf("%d %s %s", p->pid, state, p->name);
     printf("\n");
+  }
+}
+
+// forkn
+int forkn(int n , int* pids){
+  struct proc *p = myproc();
+  struct proc *children[16]; // max 16
+  int count_childs = 0;
+  int pid[n];
+  if(n > 16 || n < 1)
+  {
+    return -1;
+  }
+
+  for( int i=0 ; i<n ; i++)
+  {
+    children[i] = allocproc();
+    if (children[i] == 0) // fail
+    {
+      for( int j=0 ; j<i ; j++)
+      {
+        acquire(&children[j]->lock);
+        freeproc(children[j]);
+        release(&children[j]->lock);
+      }
+      return -1;
+    }
+
+    if (uvmcopy(p->pagetable, children[i]->pagetable, p->sz) < 0)
+    {
+      freeproc(children[i]);
+      for( int j=0 ; j<i ; j++)
+      {
+        acquire(&children[j]->lock);
+        freeproc(children[j]);
+        release(&children[j]->lock);
+      }
+      return -1;
+    }
+
+    children[i]->sz = p->sz;
+
+    // copy saved user registers.
+    *(children[i]->trapframe) = *(p->trapframe);
+
+    // Cause fork to return 0 in the child.
+    children[i]->trapframe->a0 = i+1;
+
+    // increment reference counts on open file descriptors.
+    for (int j = 0; j < NOFILE; j++)
+      if (p->ofile[j])
+       children[i]->ofile[j] = filedup(p->ofile[j]);
+
+    children[i]->cwd = idup(p->cwd);
+
+    safestrcpy(children[i]->name, p->name, sizeof(p->name));
+    pid[i] = children[i] ->pid;
+
+    release(&children[i]->lock);
+
+    acquire(&wait_lock);
+    children[i]->parent = p;
+    release(&wait_lock); 
+
+    count_childs ++;
+  }
+
+  if (count_childs < n  || (pids != 0 && copyout(p->pagetable, (uint64)pids, (char*)pid, sizeof(int) * n) < 0)) {
+    for (int j = 0; j < count_childs; j++) {
+      acquire(&children[j]->lock);
+      freeproc(children[j]);
+      release(&children[j]->lock);
+    }
+    return -1;
+  }
+
+  for (int i = 0; i < n; i++){
+    struct proc *np = children[i];
+    acquire(&np->lock);
+    np->state = RUNNABLE;
+    release(&np->lock);
+  }
+  
+  return 0;
+}
+
+//waitall
+int
+waitall(uint64 n, uint64 statuses) 
+{
+  struct proc *pp;
+  int havekids, running;
+  int children_num = 0;
+  int children_status[NPROC];
+  struct proc *p = myproc();
+
+  acquire(&wait_lock);
+
+  for (;;)
+  {
+    // Scan through table looking for exited children.
+    havekids = 0;
+    running= 0;
+    for (pp = proc; pp < &proc[NPROC]; pp++)
+    {
+      if (pp->parent == p)
+      {
+        // make sure the child isn't still in exit() or swtch().
+        havekids = 1;
+        acquire(&pp->lock);
+        if (pp->state == ZOMBIE){
+          // Found one.
+          children_status[children_num ++] = pp->xstate;
+          freeproc(pp);
+          release(&pp->lock);
+        }
+        else{ 
+          running = 1;
+          release(&pp->lock);
+        }
+      }
+    }
+    if(!havekids){
+      // No children at all
+      release(&wait_lock);
+      return 0;
+    }
+
+    if (!running){
+      // All children exited, copy results
+      if(copyout(p->pagetable, (uint64)n, (char *)&children_num, sizeof(int)) < 0){
+        release(&wait_lock);
+        return -1;
+      }
+      
+      // Copy statuses to user space
+      if(copyout(p->pagetable, (uint64)statuses, (char *)children_status, 
+      children_num * sizeof(int)) < 0){
+        release(&wait_lock);
+        return -1;
+      }
+      release(&wait_lock);
+      return 0;
+    }
+    // Wait for a child to exit.
+    sleep(p, &wait_lock); // DOC: wait-sleep
   }
 }

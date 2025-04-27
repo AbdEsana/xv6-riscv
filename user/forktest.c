@@ -25,24 +25,24 @@ forktest(void)
     if(pid < 0)
       break;
     if(pid == 0)
-      exit(0);
+      exit(0,"");
   }
 
   if(n == N){
     print("fork claimed to work N times!\n");
-    exit(1);
+    exit(1,"fork claimed to work N times!\n");
   }
 
   for(; n > 0; n--){
-    if(wait(0) < 0){
+    if(wait(0,"") < 0){
       print("wait stopped early\n");
-      exit(1);
+      exit(1,"wait stopped early\n");
     }
   }
 
-  if(wait(0) != -1){
+  if(wait(0,"") != -1){
     print("wait got too many\n");
-    exit(1);
+    exit(1,"wait got too many\n");
   }
 
   print("fork test OK\n");
@@ -52,5 +52,5 @@ int
 main(void)
 {
   forktest();
-  exit(0);
+  exit(0,"");
 }
